@@ -25,8 +25,6 @@
 # IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 # POSSIBILITY OF SUCH DAMAGE.
 
-# $FreeBSD$
-
 # READ THIS BEFORE USING THIS CODE
 # --------------------------------
 #
@@ -52,17 +50,16 @@
 # For reference, the number of systems running portsnap at the end
 # of 2005 is roughly 4500.
 #
-# In short: Even if you already run FreeBSD CVSup, WWW, and FTP
+# In short: Even if you already run MidnightBSD FTP
 # mirrors, you shouldn't necessarily start running a portsnap mirror
-# as well.  Please talk to me (cperciva@FreeBSD.org) before you
-# start chewing up bandwidth.
+# as well. 
 
 # Usage:
 # lockf -s -t 0 lockfile	\
-#	sh -e pmirror.sh portsnap-master.freebsd.org /path/to/www
+#	sh -e pmirror.sh portsnap1.midnightbsd.org /path/to/www
 
 if [ $# -ne 2 ]; then
-	echo "Usage: pmirror.sh portsnap-master.freebsd.org /path/to/www"
+	echo "Usage: pmirror.sh portsnap1.midnightbsd.org /path/to/www"
 	exit 1
 fi
 
