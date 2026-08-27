@@ -87,6 +87,8 @@ BSPATCH=/usr/bin/bspatch
 SNAPSHOT_MAX_ARCHIVE_BYTES=268435456
 SNAPSHOT_MAX_EXPANDED_BYTES=1073741824
 OBJECT_MAX_EXPANDED_BYTES=67108864
+OBJECT_MAX_SOURCE_BYTES=67108864
+METADATA_PATCH_MAX_SOURCE_BYTES=100000
 
 # Bounded gzip expansion which requires the producer to reach a clean EOF.  The
 # FIFO lets POSIX sh preserve both command statuses without non-portable
@@ -125,6 +127,30 @@ hash_gzip_file () {
 	expand_gzip_file "${HASH_GZIP_SOURCE}" "${HASH_GZIP_OUTPUT}" \
 	    ${OBJECT_MAX_EXPANDED_BYTES} 65 || return 1
 	sha256 < "${HASH_GZIP_OUTPUT}"
+}
+
+# Read the signed little-endian target size from a BSDIFF40 header.  Reject
+# malformed and oversized declarations before bspatch can allocate its output.
+binary_patch_target_size () {
+	BINARY_PATCH_PATH=$1
+
+	if [ `wc -c < "${BINARY_PATCH_PATH}"` -lt 32 ] ||
+	    [ "`dd if="${BINARY_PATCH_PATH}" bs=1 count=8 2>/dev/null`" != \
+	    BSDIFF40 ]; then
+		return 1
+	fi
+	od -An -tu1 -j 24 -N 8 "${BINARY_PATCH_PATH}" 2>/dev/null |
+	    awk '
+	        NF != 8 { exit 1 }
+	        {
+	            value = $8 % 128
+	            for (i = 7; i >= 1; i--)
+	                value = value * 256 + $i
+	            if ($8 >= 128)
+	                value = -value
+	            printf "%.0f\n", value
+	        }
+	    '
 }
 
 # Fetch a list of missing files into the private staging directory.  Keep the
@@ -229,6 +255,16 @@ validation_path () {
 		echo "Unexpected ${VALIDATION_SUBDIR}/${VALIDATION_FILE} object type" >&2
 		return 2
 	fi
+	case ${VALIDATION_SUBDIR} in
+	s) VALIDATION_MAX_BYTES=${SNAPSHOT_MAX_ARCHIVE_BYTES} ;;
+	tp) VALIDATION_MAX_BYTES=${METADATA_PATCH_MAX_SOURCE_BYTES} ;;
+	*) VALIDATION_MAX_BYTES=${OBJECT_MAX_SOURCE_BYTES} ;;
+	esac
+	VALIDATION_SIZE=`wc -c < "${VALIDATION_SOURCE}"` || return 2
+	if [ ${VALIDATION_SIZE} -gt ${VALIDATION_MAX_BYTES} ]; then
+		echo "Oversized ${VALIDATION_SUBDIR}/${VALIDATION_FILE}" >&2
+		return 1
+	fi
 	if [ "${VALIDATION_BASE}" = "${STAGEDIR}" ]; then
 		echo "${VALIDATION_SOURCE}"
 		return 0
@@ -329,13 +365,24 @@ validate_binary_patches () {
 		VALIDATE_SOURCE=
 		VALIDATE_HASH=
 		VALIDATE_SOURCE=`find_valid_object f "${VALIDATE_FROM}.gz"` || true
+		VALIDATE_TARGET_SIZE=
+		if [ -n "${VALIDATE_PATH}" ]; then
+			VALIDATE_TARGET_SIZE=`binary_patch_target_size \
+			    "${VALIDATE_PATH}"` || true
+		fi
 		rm -f "${VALIDATE_OLD}" "${VALIDATE_NEW}"
 		if [ -f "${VALIDATE_PATH}" ] && [ ! -L "${VALIDATE_PATH}" ] &&
 		    [ -n "${VALIDATE_SOURCE}" ] &&
-		    gunzip -c "${VALIDATE_SOURCE}" > "${VALIDATE_OLD}" &&
+		    [ -n "${VALIDATE_TARGET_SIZE}" ] &&
+		    [ ${VALIDATE_TARGET_SIZE} -ge 0 ] &&
+		    [ ${VALIDATE_TARGET_SIZE} -le ${OBJECT_MAX_EXPANDED_BYTES} ] &&
+		    expand_gzip_file "${VALIDATE_SOURCE}" "${VALIDATE_OLD}" \
+		    ${OBJECT_MAX_EXPANDED_BYTES} 65 &&
 		    ${BSPATCH} "${VALIDATE_OLD}" "${VALIDATE_NEW}" \
 		    "${VALIDATE_PATH}" >/dev/null 2>&1 &&
-		    [ -f "${VALIDATE_NEW}" ] && [ ! -L "${VALIDATE_NEW}" ]; then
+		    [ -f "${VALIDATE_NEW}" ] && [ ! -L "${VALIDATE_NEW}" ] &&
+		    [ `wc -c < "${VALIDATE_NEW}"` -eq \
+		    ${VALIDATE_TARGET_SIZE} ]; then
 			VALIDATE_HASH=`sha256 < "${VALIDATE_NEW}"`
 		fi
 		if [ "${VALIDATE_HASH}" = "${VALIDATE_TO}" ]; then
@@ -374,9 +421,10 @@ validate_metadata_patches () {
 		    "${VALIDATE_TMP}" "${VALIDATE_NEW}"
 		if [ -f "${VALIDATE_PATH}" ] && [ ! -L "${VALIDATE_PATH}" ] &&
 		    [ -n "${VALIDATE_SOURCE}" ] &&
-		    gunzip -t "${VALIDATE_PATH}" 2>/dev/null &&
-		    gunzip -c "${VALIDATE_PATH}" > "${VALIDATE_DIFF}" &&
-		    gunzip -c "${VALIDATE_SOURCE}" > "${VALIDATE_OLD}"; then
+		    expand_gzip_file "${VALIDATE_PATH}" "${VALIDATE_DIFF}" \
+		    ${OBJECT_MAX_EXPANDED_BYTES} 65 &&
+		    expand_gzip_file "${VALIDATE_SOURCE}" "${VALIDATE_OLD}" \
+		    ${OBJECT_MAX_EXPANDED_BYTES} 65; then
 			cut -c 2- "${VALIDATE_DIFF}" |
 			    join -t '|' -v 2 - "${VALIDATE_OLD}" > "${VALIDATE_TMP}"
 			awk '/^\+/ { print substr($0, 2) }' "${VALIDATE_DIFF}" |

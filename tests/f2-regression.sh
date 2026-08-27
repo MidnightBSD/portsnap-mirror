@@ -80,10 +80,12 @@ EOF
 
 cat > "${TEST_BINDIR}/bspatch" <<'EOF'
 #!/bin/sh
-TEST_EXPECTED=`sed -n '1p' "$3"`
+dd if="$3" of="${3}.payload" bs=1 skip=32 2>/dev/null
+TEST_EXPECTED=`sed -n '1p' "${3}.payload"`
 TEST_ACTUAL=`sha256sum "$1" | awk '{ print $1 }'`
 [ "${TEST_ACTUAL}" = "${TEST_EXPECTED}" ] || exit 1
-sed '1d' "$3" > "$2"
+sed '1d' "${3}.payload" > "$2"
+rm "${3}.payload"
 EOF
 
 chmod +x "${TEST_BINDIR}/phttpget" "${TEST_BINDIR}/fetch" \
@@ -136,10 +138,15 @@ run_case () {
 	printf 'public key\n' > "${TEST_ORIGIN}/pub.ssl"
 	printf 'snapshot signature\n' > "${TEST_ORIGIN}/snapshot.ssl"
 	printf 'new signature\n' > "${TEST_ORIGIN}/latest.ssl"
-	printf '%s\n' "${TEST_OLD_HASH}" \
+	TEST_BP_SIZE=`wc -c < "${TEST_CASE}/INDEX.new"`
+	( printf 'BSDIFF40'
+	  printf '\000\000\000\000\000\000\000\000'
+	  printf '\000\000\000\000\000\000\000\000'
+	  printf "\\`printf '%03o' ${TEST_BP_SIZE}`"
+	  printf '\000\000\000\000\000\000\000'
+	  printf '%s\n' "${TEST_OLD_HASH}"
+	  sed -n '1,$p' "${TEST_CASE}/INDEX.new" ) \
 		> "${TEST_ORIGIN}/bp/${TEST_OLD_HASH}-${TEST_HASH}"
-	sed -n '1,$p' "${TEST_CASE}/INDEX.new" \
-		>> "${TEST_ORIGIN}/bp/${TEST_OLD_HASH}-${TEST_HASH}"
 	mkdir -p "${TEST_CASE}/snapshot/snap"
 	gzip -c "${TEST_CASE}/INDEX.new" \
 		> "${TEST_CASE}/snapshot/snap/${TEST_HASH}.gz"
@@ -176,6 +183,13 @@ run_case () {
 		printf 'invalid binary patch\n' \
 			> "${TEST_ORIGIN}/bp/${TEST_OLD_HASH}-${TEST_HASH}"
 	fi
+	if [ "${TEST_MODE}" = bad-bp-target-size ]; then
+		( printf 'BSDIFF40'
+		  printf '\000\000\000\000\000\000\000\000'
+		  printf '\000\000\000\000\000\000\000\000'
+		  printf '\001\000\000\004\000\000\000\000' ) \
+			> "${TEST_ORIGIN}/bp/${TEST_OLD_HASH}-${TEST_HASH}"
+	fi
 	if [ "${TEST_MODE}" = bad-snapshot ]; then
 		printf 'corrupt archived file\n' | gzip -c \
 			> "${TEST_CASE}/snapshot/snap/${TEST_FILE_HASH}.gz"
@@ -199,7 +213,7 @@ run_case () {
 	fi
 
 	case ${TEST_MODE} in
-	unchanged|unchanged-skew|unchanged-extra|corrupt-existing-f|corrupt-existing-t|corrupt-existing-bp|corrupt-existing-s|corrupt-existing-tp|corrupt-existing-tp-source|failed-repair-preserves-existing|directory-existing|symlink-existing)
+	unchanged|unchanged-skew|unchanged-extra|corrupt-existing-f|oversized-existing-f|corrupt-existing-t|corrupt-existing-bp|corrupt-existing-s|corrupt-existing-tp|corrupt-existing-tp-source|corrupt-existing-tp-bomb|failed-repair-preserves-existing|directory-existing|symlink-existing)
 		printf 'new signature\n' > "${TEST_PUBDIR}/latest.ssl"
 		cp "${TEST_ORIGIN}/bl.gz" "${TEST_PUBDIR}/bl.gz"
 		cp "${TEST_ORIGIN}/tl.gz" "${TEST_PUBDIR}/tl.gz"
@@ -218,6 +232,11 @@ run_case () {
 	corrupt-existing-f)
 		printf 'corrupt metadata\n' | gzip -c \
 			> "${TEST_PUBDIR}/f/${TEST_HASH}.gz"
+		;;
+	oversized-existing-f)
+		dd if=/dev/zero \
+			of="${TEST_PUBDIR}/f/${TEST_HASH}.gz" \
+			bs=1 count=1 seek=67108864 2>/dev/null
 		;;
 	corrupt-existing-t)
 		printf 'corrupt tag\n' > "${TEST_PUBDIR}/t/${TEST_TAG_HASH}"
@@ -241,13 +260,18 @@ run_case () {
 		printf 'corrupt snapshot\n' \
 			> "${TEST_PUBDIR}/s/${TEST_SNAPSHOT_HASH}.tgz"
 		;;
-	corrupt-existing-tp|corrupt-existing-tp-source)
+	corrupt-existing-tp|corrupt-existing-tp-source|corrupt-existing-tp-bomb)
 		cp "${TEST_ORIGIN}/f/${TEST_META_OLD_HASH}.gz" \
 			"${TEST_PUBDIR}/f/${TEST_META_OLD_HASH}.gz"
 		cp "${TEST_ORIGIN}/f/${TEST_META_NEW_HASH}.gz" \
 			"${TEST_PUBDIR}/f/${TEST_META_NEW_HASH}.gz"
-		printf 'corrupt metadata patch\n' | gzip -c \
-			> "${TEST_PUBDIR}/tp/${TEST_META_OLD_HASH}-${TEST_META_NEW_HASH}.gz"
+		if [ "${TEST_MODE}" = corrupt-existing-tp-bomb ]; then
+			dd if=/dev/zero bs=1048576 count=65 2>/dev/null | gzip -c \
+				> "${TEST_PUBDIR}/tp/${TEST_META_OLD_HASH}-${TEST_META_NEW_HASH}.gz"
+		else
+			printf 'corrupt metadata patch\n' | gzip -c \
+				> "${TEST_PUBDIR}/tp/${TEST_META_OLD_HASH}-${TEST_META_NEW_HASH}.gz"
+		fi
 		if [ "${TEST_MODE}" = corrupt-existing-tp-source ]; then
 			printf 'corrupt metadata source\n' | gzip -c \
 				> "${TEST_PUBDIR}/f/${TEST_META_OLD_HASH}.gz"
@@ -346,6 +370,7 @@ run_case () {
 		fi
 	if [ "${TEST_MODE}" = corrupt-existing-tp ] ||
 	    [ "${TEST_MODE}" = corrupt-existing-tp-source ] ||
+	    [ "${TEST_MODE}" = corrupt-existing-tp-bomb ] ||
 	    [ "${TEST_MODE}" = symlink-existing ]; then
 			[ -f "${TEST_PUBDIR}/tp/${TEST_META_OLD_HASH}-${TEST_META_NEW_HASH}.gz" ]
 			gunzip -t "${TEST_PUBDIR}/tp/${TEST_META_OLD_HASH}-${TEST_META_NEW_HASH}.gz"
@@ -403,6 +428,7 @@ run_case "${TEST_SCRIPT}" bad-hash failure
 run_case "${TEST_SCRIPT}" bad-expanded-f failure
 run_case "${TEST_SCRIPT}" bad-tag failure
 run_case "${TEST_SCRIPT}" bad-bp failure
+run_case "${TEST_SCRIPT}" bad-bp-target-size failure
 run_case "${TEST_SCRIPT}" bad-snapshot failure
 run_case "${TEST_SCRIPT}" bad-snapshot-link failure
 run_case "${TEST_SCRIPT}" bad-snapshot-duplicate failure
@@ -411,12 +437,14 @@ run_case "${TEST_SCRIPT}" unchanged success
 run_case "${TEST_SCRIPT}" unchanged-skew success
 run_case "${TEST_SCRIPT}" unchanged-extra success
 run_case "${TEST_SCRIPT}" corrupt-existing-f success
+run_case "${TEST_SCRIPT}" oversized-existing-f success
 run_case "${TEST_SCRIPT}" corrupt-existing-t success
 run_case "${TEST_SCRIPT}" corrupt-existing-bp success
 run_case "${TEST_SCRIPT}" corrupt-existing-s success
 run_case "${TEST_SCRIPT}" changed-corrupt-existing success
 run_case "${TEST_SCRIPT}" corrupt-existing-tp success
 run_case "${TEST_SCRIPT}" corrupt-existing-tp-source success
+run_case "${TEST_SCRIPT}" corrupt-existing-tp-bomb success
 run_case "${TEST_SCRIPT}" quarantine-extra success
 run_case "${TEST_SCRIPT}" symlink-existing success
 run_case "${TEST_SCRIPT}" failed-repair-preserves-existing failure
