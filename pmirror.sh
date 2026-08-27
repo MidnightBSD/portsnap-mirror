@@ -92,26 +92,26 @@ METADATA_PATCH_MAX_SOURCE_BYTES=100000
 
 # Bounded gzip expansion which requires the producer to reach a clean EOF.  The
 # FIFO lets POSIX sh preserve both command statuses without non-portable
-# pipefail.  COUNT is one MiB block beyond MAX_BYTES so oversize streams fail.
+# pipefail.  head counts bytes rather than short FIFO reads, and one byte beyond
+# MAX_BYTES lets the final size check reject oversized streams.
 expand_gzip_file () {
 	EXPAND_GZIP_SOURCE=$1
 	EXPAND_GZIP_OUTPUT=$2
 	EXPAND_GZIP_MAX_BYTES=$3
-	EXPAND_GZIP_COUNT=$4
+	EXPAND_GZIP_LIMIT=`expr ${EXPAND_GZIP_MAX_BYTES} + 1`
 	EXPAND_GZIP_FIFO=${WRKDIR}/gzip.verify.fifo
 
 	rm -f "${EXPAND_GZIP_FIFO}" "${EXPAND_GZIP_OUTPUT}"
 	mkfifo "${EXPAND_GZIP_FIFO}"
 	gunzip -c "${EXPAND_GZIP_SOURCE}" > "${EXPAND_GZIP_FIFO}" 2>/dev/null &
 	EXPAND_GZIP_PID=$!
-	EXPAND_GZIP_DD_STATUS=0
-	dd if="${EXPAND_GZIP_FIFO}" of="${EXPAND_GZIP_OUTPUT}" \
-	    bs=1048576 count=${EXPAND_GZIP_COUNT} 2>/dev/null ||
-	    EXPAND_GZIP_DD_STATUS=$?
+	EXPAND_GZIP_HEAD_STATUS=0
+	head -c ${EXPAND_GZIP_LIMIT} < "${EXPAND_GZIP_FIFO}" \
+	    > "${EXPAND_GZIP_OUTPUT}" || EXPAND_GZIP_HEAD_STATUS=$?
 	EXPAND_GZIP_STATUS=0
 	wait ${EXPAND_GZIP_PID} || EXPAND_GZIP_STATUS=$?
 	rm -f "${EXPAND_GZIP_FIFO}"
-	if [ ${EXPAND_GZIP_DD_STATUS} -ne 0 ] ||
+	if [ ${EXPAND_GZIP_HEAD_STATUS} -ne 0 ] ||
 	    [ ${EXPAND_GZIP_STATUS} -ne 0 ] ||
 	    [ `wc -c < "${EXPAND_GZIP_OUTPUT}"` -gt \
 	    ${EXPAND_GZIP_MAX_BYTES} ]; then
@@ -125,7 +125,7 @@ hash_gzip_file () {
 	HASH_GZIP_OUTPUT=$2
 
 	expand_gzip_file "${HASH_GZIP_SOURCE}" "${HASH_GZIP_OUTPUT}" \
-	    ${OBJECT_MAX_EXPANDED_BYTES} 65 || return 1
+	    ${OBJECT_MAX_EXPANDED_BYTES} || return 1
 	sha256 < "${HASH_GZIP_OUTPUT}"
 }
 
@@ -377,7 +377,7 @@ validate_binary_patches () {
 		    [ ${VALIDATE_TARGET_SIZE} -ge 0 ] &&
 		    [ ${VALIDATE_TARGET_SIZE} -le ${OBJECT_MAX_EXPANDED_BYTES} ] &&
 		    expand_gzip_file "${VALIDATE_SOURCE}" "${VALIDATE_OLD}" \
-		    ${OBJECT_MAX_EXPANDED_BYTES} 65 &&
+		    ${OBJECT_MAX_EXPANDED_BYTES} &&
 		    ${BSPATCH} "${VALIDATE_OLD}" "${VALIDATE_NEW}" \
 		    "${VALIDATE_PATH}" >/dev/null 2>&1 &&
 		    [ -f "${VALIDATE_NEW}" ] && [ ! -L "${VALIDATE_NEW}" ] &&
@@ -422,9 +422,9 @@ validate_metadata_patches () {
 		if [ -f "${VALIDATE_PATH}" ] && [ ! -L "${VALIDATE_PATH}" ] &&
 		    [ -n "${VALIDATE_SOURCE}" ] &&
 		    expand_gzip_file "${VALIDATE_PATH}" "${VALIDATE_DIFF}" \
-		    ${OBJECT_MAX_EXPANDED_BYTES} 65 &&
+		    ${OBJECT_MAX_EXPANDED_BYTES} &&
 		    expand_gzip_file "${VALIDATE_SOURCE}" "${VALIDATE_OLD}" \
-		    ${OBJECT_MAX_EXPANDED_BYTES} 65; then
+		    ${OBJECT_MAX_EXPANDED_BYTES}; then
 			cut -c 2- "${VALIDATE_DIFF}" |
 			    join -t '|' -v 2 - "${VALIDATE_OLD}" > "${VALIDATE_TMP}"
 			awk '/^\+/ { print substr($0, 2) }' "${VALIDATE_DIFF}" |
@@ -467,7 +467,7 @@ validate_snapshots () {
 		    ${SNAPSHOT_MAX_ARCHIVE_BYTES} ] &&
 		    expand_gzip_file "${VALIDATE_PATH}" \
 		    "${VALIDATE_DIR}/snapshot.tar" \
-		    ${SNAPSHOT_MAX_EXPANDED_BYTES} 1025 &&
+		    ${SNAPSHOT_MAX_EXPANDED_BYTES} &&
 		    [ -n "${VALIDATE_TAG}" ] &&
 		    ! grep -qvE '^[0-9A-Z.]+\|[0-9a-f]{64}$' "${VALIDATE_TAG}" &&
 		    [ `grep '^INDEX|' "${VALIDATE_TAG}" | wc -l` -eq 1 ] &&
