@@ -211,17 +211,16 @@ run_case () {
 	esac
 }
 
-for TEST_SCRIPT in pmirror.sh ps-mirror.sh; do
-	run_case "${TEST_SCRIPT}" failure failure
-	run_case "${TEST_SCRIPT}" missing failure
-	run_case "${TEST_SCRIPT}" bad-hash failure
-	run_case "${TEST_SCRIPT}" bad-tag failure
-	run_case "${TEST_SCRIPT}" success success
-	run_case "${TEST_SCRIPT}" unchanged success
-	run_case "${TEST_SCRIPT}" unchanged-skew success
-	run_case "${TEST_SCRIPT}" corrupt-existing-f success
-	run_case "${TEST_SCRIPT}" corrupt-existing-t success
-	run_case "${TEST_SCRIPT}" symlink-existing success
-done
+TEST_SCRIPT=pmirror.sh
+run_case "${TEST_SCRIPT}" failure failure
+run_case "${TEST_SCRIPT}" missing failure
+run_case "${TEST_SCRIPT}" bad-hash failure
+run_case "${TEST_SCRIPT}" bad-tag failure
+run_case "${TEST_SCRIPT}" success success
+run_case "${TEST_SCRIPT}" unchanged success
+run_case "${TEST_SCRIPT}" unchanged-skew success
+run_case "${TEST_SCRIPT}" corrupt-existing-f success
+run_case "${TEST_SCRIPT}" corrupt-existing-t success
+run_case "${TEST_SCRIPT}" symlink-existing success
 
 echo "F2 regression tests passed"

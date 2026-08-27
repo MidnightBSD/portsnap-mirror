@@ -5,10 +5,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Overview
 
 Portsnap mirroring code for MidnightBSD, derived from Colin Percival's FreeBSD
-`user/cperciva/portsnap-mirror` (see the `$FreeBSD:` tag at `ps-mirror.sh:28`). These
-scripts pull a portsnap master's published tree onto a local mirror and republish it
-over HTTP. There is no build system or dependency manifest — the repo is two POSIX `sh`
-scripts plus embedded Perl, and one shell regression suite.
+`user/cperciva/portsnap-mirror`. The script pulls a portsnap master's published tree
+onto a local mirror and republishes it over HTTP. There is no build system or dependency
+manifest — the repo is one POSIX `sh` script with embedded Perl, and one shell regression
+suite.
 
 ## Running and validating
 
@@ -22,7 +22,7 @@ sh -n pmirror.sh            # syntax-only check
 ```
 
 `tests/f2-regression.sh` builds a fake origin tree and fake `phttpget`/`fetch` in a
-temp dir, then runs **both** scripts through every case (`tests/f2-regression.sh:214`).
+temp dir, then runs the mirror script through every case.
 Cases: a transfer that fails partway (`FAIL_OBJECT`), an origin that silently omits a
 requested object (`OMIT_OBJECT`), an origin serving an object under the wrong hash, a
 corrupt `f/` or `t/` object already published, a symlinked object, and an unchanged
@@ -37,28 +37,14 @@ Real invocation, guarded so concurrent cron runs can't overlap:
 lockf -s -t 0 lockfile sh -e pmirror.sh portsnap1.midnightbsd.org /path/to/www
 ```
 
-Both scripts take exactly two arguments: the upstream portsnap server and the public web
+The script takes exactly two arguments: the upstream portsnap server and the public web
 root. A first run against an empty `PUBDIR` self-initializes it (creates `bp/ f/ s/ t/
 tp/`, an empty `latest.ssl`, and a `robots.txt` that disallows everything).
 
-## The two scripts
+## Main files
 
-- **`pmirror.sh`** — what mirror operators run. This is the one to reach for by default.
-- **`ps-mirror.sh`** — identical except for the "Updating indextimes" step near the end,
-  which accumulates `${PUBDIR}/indextimes` (INDEX hash → build time) from the `INDEX`
-  entries in `tl`. Nothing in portsnap fetches that file; it is read off local disk by
-  `www-logprocess.sh` in cperciva's `efs-fup` to compute how much update data clients
-  pulled, by version. Only useful on a host that also processes its own web logs.
-
-When changing mirroring logic, apply the change to **both** files — `indextimes` is the
-only intended difference, and the suite runs both, so a divergence shows up as a test
-failure rather than silently.
-
-Note the `indextimes` step reads `${PUBDIR}/indextimes` unconditionally via `join`, and
-nothing creates it — not even the empty-web-root setup block — so `ps-mirror.sh` aborts
-on a web root that has never had one. The test suite works around this by pre-creating
-the file (`tests/f2-regression.sh:115`). Guarding the step on the file's existence would
-both fix that and let the two scripts collapse into one.
+- **`pmirror.sh`** — the mirror implementation deployed by MidnightBSD.
+- **`tests/f2-regression.sh`** — the isolated regression suite for mirroring behavior.
 
 ## How a mirror run works
 
