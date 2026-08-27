@@ -126,7 +126,7 @@ run_case () {
 	esac
 
 	case ${TEST_MODE} in
-	unchanged|unchanged-skew)
+	unchanged|unchanged-skew|corrupt-existing-f|corrupt-existing-t|symlink-existing)
 		printf 'new signature\n' > "${TEST_PUBDIR}/latest.ssl"
 		cp "${TEST_ORIGIN}/bl.gz" "${TEST_PUBDIR}/bl.gz"
 		cp "${TEST_ORIGIN}/tl.gz" "${TEST_PUBDIR}/tl.gz"
@@ -141,6 +141,21 @@ run_case () {
 		: > "${TEST_CASE}/skew-bl"
 		gzip -c "${TEST_CASE}/skew-bl" > "${TEST_ORIGIN}/bl.gz"
 	fi
+	case ${TEST_MODE} in
+	corrupt-existing-f)
+		printf 'corrupt metadata\n' | gzip -c \
+			> "${TEST_PUBDIR}/f/${TEST_HASH}.gz"
+		;;
+	corrupt-existing-t)
+		printf 'corrupt tag\n' > "${TEST_PUBDIR}/t/${TEST_TAG_HASH}"
+		;;
+	symlink-existing)
+		ln -s "${TEST_ORIGIN}/f/${TEST_HASH}.gz" \
+			"${TEST_PUBDIR}/f/${TEST_HASH}.gz"
+		ln -s "${TEST_ORIGIN}/t/${TEST_TAG_HASH}" \
+			"${TEST_PUBDIR}/t/${TEST_TAG_HASH}"
+		;;
+	esac
 
 	sed 's#/usr/libexec/phttpget#phttpget#' "${TEST_SCRIPT}" \
 		> "${TEST_CASE}/mirror.sh"
@@ -177,6 +192,8 @@ run_case () {
 		[ -f "${TEST_PUBDIR}/t/${TEST_TAG_HASH}" ]
 		[ `gunzip -c "${TEST_PUBDIR}/f/${TEST_HASH}.gz" | sha256sum | awk '{ print $1 }'` = "${TEST_HASH}" ]
 		[ `sha256sum "${TEST_PUBDIR}/t/${TEST_TAG_HASH}" | awk '{ print $1 }'` = "${TEST_TAG_HASH}" ]
+		[ ! -L "${TEST_PUBDIR}/f/${TEST_HASH}.gz" ]
+		[ ! -L "${TEST_PUBDIR}/t/${TEST_TAG_HASH}" ]
 		cmp -s "${TEST_ORIGIN}/latest.ssl" "${TEST_PUBDIR}/latest.ssl"
 		if [ -f "${TEST_CASE}/published-bl.gz" ]; then
 			cmp -s "${TEST_CASE}/published-bl.gz" "${TEST_PUBDIR}/bl.gz"
@@ -202,6 +219,9 @@ for TEST_SCRIPT in pmirror.sh ps-mirror.sh; do
 	run_case "${TEST_SCRIPT}" success success
 	run_case "${TEST_SCRIPT}" unchanged success
 	run_case "${TEST_SCRIPT}" unchanged-skew success
+	run_case "${TEST_SCRIPT}" corrupt-existing-f success
+	run_case "${TEST_SCRIPT}" corrupt-existing-t success
+	run_case "${TEST_SCRIPT}" symlink-existing success
 done
 
 echo "F2 regression tests passed"

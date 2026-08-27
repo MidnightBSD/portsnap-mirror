@@ -139,6 +139,50 @@ verify_required_files () {
 	done < "${VERIFY_WANTED}"
 }
 
+# The publication directory must be writable only by the mirror operator.
+# Reject symlinks and validate content-addressed objects before treating an
+# existing object as usable.  Invalid objects are omitted from the valid list
+# so they are fetched into the private staging directory and replaced.
+validate_content_addressed_files () {
+	VALIDATE_BASE=$1
+	VALIDATE_SUBDIR=$2
+	VALIDATE_WANTED=$3
+	VALIDATE_VALID=$4
+
+	: > "${VALIDATE_VALID}"
+	while read VALIDATE_FILE; do
+		VALIDATE_PATH=${VALIDATE_BASE}/${VALIDATE_SUBDIR}/${VALIDATE_FILE}
+		VALIDATE_HASH=
+		case ${VALIDATE_SUBDIR} in
+		f)
+			if [ -f "${VALIDATE_PATH}" ] &&
+			    [ ! -L "${VALIDATE_PATH}" ] &&
+			    gunzip -t "${VALIDATE_PATH}" 2>/dev/null; then
+				VALIDATE_HASH=`gunzip -c "${VALIDATE_PATH}" | sha256`
+			fi
+			VALIDATE_EXPECTED=${VALIDATE_FILE%.gz}
+			;;
+		t)
+			if [ -f "${VALIDATE_PATH}" ] &&
+			    [ ! -L "${VALIDATE_PATH}" ]; then
+				VALIDATE_HASH=`sha256 < "${VALIDATE_PATH}"`
+			fi
+			VALIDATE_EXPECTED=${VALIDATE_FILE}
+			;;
+		*)
+			echo "Cannot content-validate ${VALIDATE_SUBDIR} files" >&2
+			return 1
+			;;
+		esac
+
+		if [ "${VALIDATE_HASH}" = "${VALIDATE_EXPECTED}" ]; then
+			echo "${VALIDATE_FILE}" >> "${VALIDATE_VALID}"
+		else
+			echo "Invalid ${VALIDATE_SUBDIR}/${VALIDATE_FILE}" >&2
+		fi
+	done < "${VALIDATE_WANTED}"
+}
+
 export HTTP_USER_AGENT="pmirror/0.9"
 
 # If ${PUBDIR}/pub.ssl does not exist, assume we have an empty
@@ -215,17 +259,12 @@ sort f.wanted > f.wanted.tmp
 mv f.wanted.tmp f.wanted
 ( cd ${PUBDIR}/f/ && ls ) |
 	grep -E '^[0-9a-f]{64}\.gz$' > f.present || true
+validate_content_addressed_files "${PUBDIR}" f f.wanted f.valid
 echo "`date`: Fetching needed files"
-comm -13 f.present f.wanted > f.missing
+comm -13 f.valid f.wanted > f.missing
 fetch_missing_files f f.missing
-while read FFILE; do
-	F=${FFILE%.gz}
-	if ! gunzip -t ${STAGEDIR}/f/${FFILE} 2>/dev/null ||
-	    ! [ `gunzip < ${STAGEDIR}/f/${FFILE} | sha256` = $F ]; then
-		echo "Invalid staged f/${FFILE}" >&2
-		exit 1
-	fi
-done < f.missing
+validate_content_addressed_files "${STAGEDIR}" f f.missing f.staged.valid
+cmp -s f.missing f.staged.valid || exit 1
 
 echo "`date`: Fetching extra files list"
 rm -f el.gz el
@@ -251,15 +290,12 @@ grep -E '^t/' el | cut -f 2 -d '/' |
 	sort | grep -E '^[0-9a-f]{64}$' > t.wanted || true
 ( cd ${PUBDIR}/t/ && ls ) |
 	grep -E '^[0-9a-f]{64}$' > t.present || true
+validate_content_addressed_files "${PUBDIR}" t t.wanted t.valid
 echo "`date`: Fetching needed tags"
-comm -13 t.present t.wanted > t.missing
+comm -13 t.valid t.wanted > t.missing
 fetch_missing_files t t.missing
-while read TFILE; do
-	if ! [ `sha256 < ${STAGEDIR}/t/${TFILE}` = ${TFILE} ]; then
-		echo "Invalid staged t/${TFILE}" >&2
-		exit 1
-	fi
-done < t.missing
+validate_content_addressed_files "${STAGEDIR}" t t.missing t.staged.valid
+cmp -s t.missing t.staged.valid || exit 1
 
 echo "`date`: Installing and verifying needed files"
 install_staged_files bp bp.missing
@@ -270,6 +306,10 @@ verify_required_files bp bp.wanted
 verify_required_files f f.wanted
 verify_required_files s s.wanted
 verify_required_files t t.wanted
+validate_content_addressed_files "${PUBDIR}" f f.wanted f.final.valid
+cmp -s f.wanted f.final.valid || exit 1
+validate_content_addressed_files "${PUBDIR}" t t.wanted t.final.valid
+cmp -s t.wanted t.final.valid || exit 1
 
 # Don't bother deleting old tag files.  They don't take up any
 # significant space, and keeping them is useful for statistical
@@ -445,9 +485,9 @@ rm -f tl.INDEX
 rm tl.sorted metadata.latest
 rm bp.wanted bp.present
 rm bp.missing
-rm f.wanted f.present f.missing
+rm f.wanted f.present f.valid f.missing f.staged.valid f.final.valid
 rm s.present s.wanted s.missing
-rm t.present t.wanted t.missing
+rm t.present t.wanted t.valid t.missing t.staged.valid t.final.valid
 rm tp.present tp.wanted tp.needed
 
 # Temporary and staging directories are removed by the exit trap.
