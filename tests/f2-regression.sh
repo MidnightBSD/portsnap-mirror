@@ -123,12 +123,21 @@ run_case () {
 	TEST_TAG_HASH=`printf 'valid tag\n' | sha256sum | awk '{ print $1 }'`
 	TEST_SENTINEL=`printf 'retained object\n' | sha256sum | awk '{ print $1 }'`
 	TEST_BAD_HASH=0000000000000000000000000000000000000000000000000000000000000000
+	TEST_LARGE_HASH=
 	printf 'INDEX|200000|%s\nINDEX|200001|%s\n' \
 		"${TEST_OLD_HASH}" "${TEST_HASH}" \
 		> "${TEST_CASE}/bl"
 	printf 'DESCRIBE|199999|%s\nDESCRIBE|200001|%s\n' \
 		"${TEST_META_OLD_HASH}" "${TEST_META_NEW_HASH}" \
 		> "${TEST_CASE}/tl"
+	if [ "${TEST_MODE}" = large-valid-f ]; then
+		dd if=/dev/zero of="${TEST_CASE}/large.valid" \
+			bs=1048576 count=6 2>/dev/null
+		TEST_LARGE_HASH=`sha256sum "${TEST_CASE}/large.valid" | \
+			awk '{ print $1 }'`
+		printf 'LARGE|200001|%s\n' "${TEST_LARGE_HASH}" \
+			>> "${TEST_CASE}/tl"
+	fi
 	printf 's/%s.tgz\nt/%s\nt/%s\n' "${TEST_SNAPSHOT_HASH}" \
 		"${TEST_SNAPSHOT_HASH}" "${TEST_TAG_HASH}" \
 		> "${TEST_CASE}/el"
@@ -171,6 +180,10 @@ run_case () {
 		> "${TEST_ORIGIN}/f/${TEST_META_OLD_HASH}.gz"
 	gzip -c "${TEST_CASE}/metadata.new" \
 		> "${TEST_ORIGIN}/f/${TEST_META_NEW_HASH}.gz"
+	if [ -n "${TEST_LARGE_HASH}" ]; then
+		gzip -c "${TEST_CASE}/large.valid" \
+			> "${TEST_ORIGIN}/f/${TEST_LARGE_HASH}.gz"
+	fi
 	if [ "${TEST_MODE}" = bad-hash ]; then
 		printf 'invalid metadata\n' | gzip -c \
 			> "${TEST_ORIGIN}/f/${TEST_HASH}.gz"
@@ -359,6 +372,11 @@ run_case () {
 		[ ! -L "${TEST_PUBDIR}/t/${TEST_TAG_HASH}" ]
 		[ ! -L "${TEST_PUBDIR}/bp/${TEST_OLD_HASH}-${TEST_HASH}" ]
 		[ ! -L "${TEST_PUBDIR}/s/${TEST_SNAPSHOT_HASH}.tgz" ]
+		if [ -n "${TEST_LARGE_HASH}" ]; then
+			[ -f "${TEST_PUBDIR}/f/${TEST_LARGE_HASH}.gz" ]
+			[ `gunzip -c "${TEST_PUBDIR}/f/${TEST_LARGE_HASH}.gz" | \
+			    sha256sum | awk '{ print $1 }'` = "${TEST_LARGE_HASH}" ]
+		fi
 		cmp -s "${TEST_ORIGIN}/bp/${TEST_OLD_HASH}-${TEST_HASH}" \
 			"${TEST_PUBDIR}/bp/${TEST_OLD_HASH}-${TEST_HASH}"
 		cmp -s "${TEST_ORIGIN}/s/${TEST_SNAPSHOT_HASH}.tgz" \
@@ -433,6 +451,7 @@ run_case "${TEST_SCRIPT}" bad-snapshot failure
 run_case "${TEST_SCRIPT}" bad-snapshot-link failure
 run_case "${TEST_SCRIPT}" bad-snapshot-duplicate failure
 run_case "${TEST_SCRIPT}" success success
+run_case "${TEST_SCRIPT}" large-valid-f success
 run_case "${TEST_SCRIPT}" unchanged success
 run_case "${TEST_SCRIPT}" unchanged-skew success
 run_case "${TEST_SCRIPT}" unchanged-extra success
