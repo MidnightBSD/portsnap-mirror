@@ -60,6 +60,40 @@ Wrap the invocation in `lockf` so a slow run cannot overlap the next one:
 Each stage is announced with a timestamp on stdout, so cron mail is a usable log. A run
 against an unchanged generation says it is verifying mirror contents.
 
+## Cleaning a primary rsync web root
+
+Do not delete Portsnap objects based only on filesystem modification time. An immutable
+content-addressed object can remain referenced by a current manifest long after its
+original upload time.
+
+`portsnap-clean.sh` is intended for the primary webserver which receives a published
+tree via rsync. It reads only the local `bl.gz`, `tl.gz`, and `el.gz` manifests; it does
+not contact the private builder. By default it is a dry run:
+
+```sh
+/usr/local/portsnap-mirror/portsnap-clean.sh /home/portsnap/htmldocs/
+```
+
+Apply mode records when each object first becomes unreferenced. An object must remain
+unreferenced for 45 days before it is moved outside the web root into
+`/home/portsnap/.portsnap-clean/quarantine/`. Quarantine batches are retained for another
+30 days before deletion:
+
+```sh
+lockf -s -t 0 /home/portsnap/.portsnap-publish.lock \
+	/usr/local/portsnap-mirror/portsnap-clean.sh --apply /home/portsnap/htmldocs/
+```
+
+Use the same lock around the webserver-side rsync operation when possible. The script
+also compares stable copies of all manifests and control files before changing anything,
+rejects malformed or oversized manifests, ignores unexpected filenames, and never
+manages top-level control files. The grace period protects newly rsynced objects which
+arrive before their manifests and old objects referenced by cached manifests. Run it as
+the dedicated account which owns the web root; it refuses publication and state
+directories owned by another account or writable by a group or other users. The primary
+build's `bp/`, `f/`, `s/`, and `t/` directories are required; `tp/` is cleaned when
+present.
+
 ## Mirror script
 
 `pmirror.sh` is what mirror operators run.
@@ -68,6 +102,7 @@ against an unchanged generation says it is verifying mirror contents.
 
 ```sh
 sh tests/f2-regression.sh
+sh tests/cleanup-regression.sh
 ```
 
 The suite stubs out `phttpget` and `fetch` against a fake origin tree, so it needs no

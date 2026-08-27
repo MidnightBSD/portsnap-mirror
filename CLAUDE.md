@@ -19,6 +19,7 @@ anywhere:
 
 ```sh
 sh tests/f2-regression.sh   # full suite; no network, no portsnap server needed
+sh tests/cleanup-regression.sh # primary-webroot cleanup suite; no network needed
 sh -n pmirror.sh            # syntax-only check
 ```
 
@@ -44,7 +45,9 @@ tp/`, an empty `latest.ssl`, and a `robots.txt` that disallows everything).
 ## Main files
 
 - **`pmirror.sh`** — the mirror implementation deployed by MidnightBSD.
+- **`portsnap-clean.sh`** — fail-closed, manifest-aware cleanup for a primary rsync web root.
 - **`tests/f2-regression.sh`** — the isolated regression suite for mirroring behavior.
+- **`tests/cleanup-regression.sh`** — isolated cleanup, quarantine, and manifest-validation tests.
 
 ## How a mirror run works
 
