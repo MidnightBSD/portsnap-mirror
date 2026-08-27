@@ -12,7 +12,7 @@ repo is three POSIX `sh` scripts plus embedded Perl.
 
 ## Running and validating
 
-The scripts only run on MidnightBSD/FreeBSD: they depend on `/usr/libexec/phttpget`,
+The scripts only run on MidnightBSD: they depend on `/usr/libexec/phttpget`,
 `fetch`, `lam`, `sha256`, and (in the documented invocation) `lockf`. They will not run
 as-is on Linux, so on a Linux dev box you can only syntax-check and reason about them:
 
