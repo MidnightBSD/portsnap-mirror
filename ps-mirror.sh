@@ -69,9 +69,119 @@ WRKDIR=`mktemp -d -t pmirror` || exit 1
 chown :`id -ng` ${WRKDIR}
 cd ${WRKDIR}
 
+STAGEDIR=
+cleanup () {
+	cd /tmp/
+	if [ -n "${STAGEDIR}" ] && [ -d "${STAGEDIR}" ]; then
+		rm -r "${STAGEDIR}"
+	fi
+	if [ -d "${WRKDIR}" ]; then
+		rm -r "${WRKDIR}"
+	fi
+}
+trap cleanup 0
+trap 'exit 1' 1 2 15
+
 SERVER=$1
 PUBDIR=$2
 PHTTPGET="/usr/libexec/phttpget ${SERVER}"
+
+# Fetch a list of missing files into the private staging directory.  Keep the
+# phttpget status separate from the filtered log output so a failed transfer
+# always aborts the run.
+fetch_missing_files () {
+	FETCH_SUBDIR=$1
+	FETCH_MISSING=$2
+	FETCH_LIST=${WRKDIR}/${FETCH_SUBDIR}.fetch
+	FETCH_LOG=${WRKDIR}/${FETCH_SUBDIR}.fetch.log
+
+	if ! [ -s "${FETCH_MISSING}" ]; then
+		return 0
+	fi
+
+	lam -s "${FETCH_SUBDIR}/" "${FETCH_MISSING}" > "${FETCH_LIST}"
+	if ! ( cd "${STAGEDIR}/${FETCH_SUBDIR}" && \
+	    xargs ${PHTTPGET} < "${FETCH_LIST}" ) \
+	    > "${FETCH_LOG}" 2>&1; then
+		grep -v "200 OK" "${FETCH_LOG}" || true
+		echo "Failed to fetch required ${FETCH_SUBDIR} files" >&2
+		return 1
+	fi
+	grep -v "200 OK" "${FETCH_LOG}" || true
+
+	while read FETCH_FILE; do
+		if ! [ -f "${STAGEDIR}/${FETCH_SUBDIR}/${FETCH_FILE}" ]; then
+			echo "Missing staged ${FETCH_SUBDIR}/${FETCH_FILE}" >&2
+			return 1
+		fi
+	done < "${FETCH_MISSING}"
+}
+
+install_staged_files () {
+	INSTALL_SUBDIR=$1
+	INSTALL_MISSING=$2
+
+	while read INSTALL_FILE; do
+		mv "${STAGEDIR}/${INSTALL_SUBDIR}/${INSTALL_FILE}" \
+		    "${PUBDIR}/${INSTALL_SUBDIR}/${INSTALL_FILE}"
+	done < "${INSTALL_MISSING}"
+}
+
+verify_required_files () {
+	VERIFY_SUBDIR=$1
+	VERIFY_WANTED=$2
+
+	while read VERIFY_FILE; do
+		if ! [ -f "${PUBDIR}/${VERIFY_SUBDIR}/${VERIFY_FILE}" ]; then
+			echo "Missing required ${VERIFY_SUBDIR}/${VERIFY_FILE}" >&2
+			return 1
+		fi
+	done < "${VERIFY_WANTED}"
+}
+
+# The publication directory must be writable only by the mirror operator.
+# Reject symlinks and validate content-addressed objects before treating an
+# existing object as usable.  Invalid objects are omitted from the valid list
+# so they are fetched into the private staging directory and replaced.
+validate_content_addressed_files () {
+	VALIDATE_BASE=$1
+	VALIDATE_SUBDIR=$2
+	VALIDATE_WANTED=$3
+	VALIDATE_VALID=$4
+
+	: > "${VALIDATE_VALID}"
+	while read VALIDATE_FILE; do
+		VALIDATE_PATH=${VALIDATE_BASE}/${VALIDATE_SUBDIR}/${VALIDATE_FILE}
+		VALIDATE_HASH=
+		case ${VALIDATE_SUBDIR} in
+		f)
+			if [ -f "${VALIDATE_PATH}" ] &&
+			    [ ! -L "${VALIDATE_PATH}" ] &&
+			    gunzip -t "${VALIDATE_PATH}" 2>/dev/null; then
+				VALIDATE_HASH=`gunzip -c "${VALIDATE_PATH}" | sha256`
+			fi
+			VALIDATE_EXPECTED=${VALIDATE_FILE%.gz}
+			;;
+		t)
+			if [ -f "${VALIDATE_PATH}" ] &&
+			    [ ! -L "${VALIDATE_PATH}" ]; then
+				VALIDATE_HASH=`sha256 < "${VALIDATE_PATH}"`
+			fi
+			VALIDATE_EXPECTED=${VALIDATE_FILE}
+			;;
+		*)
+			echo "Cannot content-validate ${VALIDATE_SUBDIR} files" >&2
+			return 1
+			;;
+		esac
+
+		if [ "${VALIDATE_HASH}" = "${VALIDATE_EXPECTED}" ]; then
+			echo "${VALIDATE_FILE}" >> "${VALIDATE_VALID}"
+		else
+			echo "Invalid ${VALIDATE_SUBDIR}/${VALIDATE_FILE}" >&2
+		fi
+	done < "${VALIDATE_WANTED}"
+}
 
 export HTTP_USER_AGENT="pmirror/0.9"
 
@@ -85,19 +195,33 @@ if ! [ -f ${PUBDIR}/pub.ssl ]; then
 	echo 'Disallow: /' >> ${PUBDIR}/robots.txt
 fi
 
-${PHTTPGET} pub.ssl snapshot.ssl latest.ssl 2>&1 |
-	grep -v "200 OK" || true
+# Keep staged downloads inside PUBDIR so installation is an atomic rename on
+# the publication filesystem.  mktemp creates this directory mode 0700.
+STAGEDIR=`mktemp -d "${PUBDIR}/.pmirror-stage.XXXXXX"` || exit 1
+mkdir -p "${STAGEDIR}/bp" "${STAGEDIR}/f" \
+	"${STAGEDIR}/s" "${STAGEDIR}/t"
+
+if ! ${PHTTPGET} pub.ssl snapshot.ssl latest.ssl > control.fetch.log 2>&1; then
+	grep -v "200 OK" control.fetch.log || true
+	echo "Failed to fetch portsnap control files" >&2
+	exit 1
+fi
+grep -v "200 OK" control.fetch.log || true
 [ -f pub.ssl -a -f snapshot.ssl -a -f latest.ssl ]
 
+LATEST_UNCHANGED=no
 if cmp -s latest.ssl ${PUBDIR}/latest.ssl; then
-	cd /tmp/
-	rm -r ${WRKDIR}
-	exit 0
+	LATEST_UNCHANGED=yes
+	echo "`date`: Latest snapshot unchanged; verifying mirror contents"
 fi
 
 echo "`date`: Fetching binary files list"
 rm -f bl.gz bl bp.wanted bp.present
-fetch -q http://${SERVER}/bl.gz
+if [ ${LATEST_UNCHANGED} = yes ]; then
+	cp ${PUBDIR}/bl.gz bl.gz
+else
+	fetch -q http://${SERVER}/bl.gz
+fi
 [ -f bl.gz ] || exit 1
 gunzip -c bl.gz > bl
 
@@ -111,15 +235,16 @@ awk -F \| -v cutoff=`expr ${LASTSNAP} - 86400`		\
 ( cd ${PUBDIR}/bp/ && ls ) |
 	grep -E '^[0-9a-f]{64}-[0-9a-f]{64}$' > bp.present || true
 echo "`date`: Fetching needed binary patches"
-comm -13 bp.present bp.wanted | lam -s 'bp/' - |
-	( cd ${PUBDIR}/bp/ && xargs ${PHTTPGET} ) 2>&1 |
-	grep -v "200 OK" || true
-echo "`date`: Removing unneeded binary patches"
-comm -23 bp.present bp.wanted | ( cd ${PUBDIR}/bp/ && xargs rm )
+comm -13 bp.present bp.wanted > bp.missing
+fetch_missing_files bp bp.missing
 
 echo "`date`: Fetching metadata files list"
 rm -f tl.gz tl
-fetch -q http://${SERVER}/tl.gz
+if [ ${LATEST_UNCHANGED} = yes ]; then
+	cp ${PUBDIR}/tl.gz tl.gz
+else
+	fetch -q http://${SERVER}/tl.gz
+fi
 [ -f tl.gz ] || exit 1
 gunzip -c tl.gz > tl
 
@@ -134,24 +259,20 @@ sort f.wanted > f.wanted.tmp
 mv f.wanted.tmp f.wanted
 ( cd ${PUBDIR}/f/ && ls ) |
 	grep -E '^[0-9a-f]{64}\.gz$' > f.present || true
+validate_content_addressed_files "${PUBDIR}" f f.wanted f.valid
 echo "`date`: Fetching needed files"
-comm -13 f.present f.wanted | lam -s 'f/' - |
-	( cd ${PUBDIR}/f/ && xargs ${PHTTPGET} ) 2>&1 |
-	grep -v "200 OK" || true
-echo "`date`: Removing corrupt files"
-comm -13 f.present f.wanted | tr -d '.gz' | while read F; do
-	if [ -f ${PUBDIR}/f/${F}.gz ] &&
-	    ! [ `gunzip < ${PUBDIR}/f/${F}.gz | sha256` = $F ]; then
-		echo "Deleting f/$F.gz"
-		rm ${PUBDIR}/f/${F}.gz
-	fi
-done
-echo "`date`: Removing unneeded files"
-comm -23 f.present f.wanted | ( cd ${PUBDIR}/f/ && xargs rm )
+comm -13 f.valid f.wanted > f.missing
+fetch_missing_files f f.missing
+validate_content_addressed_files "${STAGEDIR}" f f.missing f.staged.valid
+cmp -s f.missing f.staged.valid || exit 1
 
 echo "`date`: Fetching extra files list"
 rm -f el.gz el
-fetch -q http://${SERVER}/el.gz
+if [ ${LATEST_UNCHANGED} = yes ]; then
+	cp ${PUBDIR}/el.gz el.gz
+else
+	fetch -q http://${SERVER}/el.gz
+fi
 [ -f el.gz ] || exit 1
 gunzip -c el.gz > el
 
@@ -161,21 +282,34 @@ grep -E '^s/' el | cut -f 2 -d '/' |
 ( cd ${PUBDIR}/s/ && ls ) |
 	grep -E '^[0-9a-f]{64}\.tgz$' > s.present || true
 echo "`date`: Fetching needed snapshots"
-comm -13 s.present s.wanted | lam -s 's/' - |
-	( cd ${PUBDIR}/s/ && xargs ${PHTTPGET} ) 2>&1 |
-	grep -v "200 OK" || true
-echo "`date`: Removing unneeded snapshots"
-comm -23 s.present s.wanted | ( cd ${PUBDIR}/s/ && xargs rm )
+comm -13 s.present s.wanted > s.missing
+fetch_missing_files s s.missing
 
 echo "`date`: Constructing list of tags wanted"
 grep -E '^t/' el | cut -f 2 -d '/' |
 	sort | grep -E '^[0-9a-f]{64}$' > t.wanted || true
 ( cd ${PUBDIR}/t/ && ls ) |
 	grep -E '^[0-9a-f]{64}$' > t.present || true
+validate_content_addressed_files "${PUBDIR}" t t.wanted t.valid
 echo "`date`: Fetching needed tags"
-comm -13 t.present t.wanted | lam -s 't/' - |
-	( cd ${PUBDIR}/t/ && xargs ${PHTTPGET} ) 2>&1 |
-	grep -v "200 OK" || true
+comm -13 t.valid t.wanted > t.missing
+fetch_missing_files t t.missing
+validate_content_addressed_files "${STAGEDIR}" t t.missing t.staged.valid
+cmp -s t.missing t.staged.valid || exit 1
+
+echo "`date`: Installing and verifying needed files"
+install_staged_files bp bp.missing
+install_staged_files f f.missing
+install_staged_files s s.missing
+install_staged_files t t.missing
+verify_required_files bp bp.wanted
+verify_required_files f f.wanted
+verify_required_files s s.wanted
+verify_required_files t t.wanted
+validate_content_addressed_files "${PUBDIR}" f f.wanted f.final.valid
+cmp -s f.wanted f.final.valid || exit 1
+validate_content_addressed_files "${PUBDIR}" t t.wanted t.final.valid
+cmp -s t.wanted t.final.valid || exit 1
 
 # Don't bother deleting old tag files.  They don't take up any
 # significant space, and keeping them is useful for statistical
@@ -319,30 +453,41 @@ while read LINE; do
 	fi
 done
 
-echo "`date`: Removing unneeded metadata patches"
-comm -23 tp.present tp.wanted | ( cd ${PUBDIR}/tp/ && xargs rm )
+if [ ${LATEST_UNCHANGED} = no ]; then
+	echo "`date`: Removing unneeded metadata patches"
+	comm -23 tp.present tp.wanted | ( cd ${PUBDIR}/tp/ && xargs rm )
 
-echo "`date`: Publishing file lists and signatures"
-mv bl.gz el.gz tl.gz ${PUBDIR}
-mv latest.ssl pub.ssl snapshot.ssl ${PUBDIR}
+	echo "`date`: Removing unneeded binary patches"
+	comm -23 bp.present bp.wanted | ( cd ${PUBDIR}/bp/ && xargs rm )
+	echo "`date`: Removing unneeded files"
+	comm -23 f.present f.wanted | ( cd ${PUBDIR}/f/ && xargs rm )
+	echo "`date`: Removing unneeded snapshots"
+	comm -23 s.present s.wanted | ( cd ${PUBDIR}/s/ && xargs rm )
 
-echo "`date`: Updating indextimes"
-grep ^INDEX tl |
-    awk -F \| ' { print $3 "|" $2 }' |
-    sort > tl.INDEX
-join -t '|' -v 1 ${PUBDIR}/indextimes tl.INDEX |
-    sort - tl.INDEX > indextimes
-mv indextimes ${PUBDIR}
+	echo "`date`: Publishing file lists and signatures"
+	mv bl.gz el.gz tl.gz ${PUBDIR}
+	mv latest.ssl pub.ssl snapshot.ssl ${PUBDIR}
+
+	echo "`date`: Updating indextimes"
+	grep ^INDEX tl |
+	    awk -F \| ' { print $3 "|" $2 }' |
+	    sort > tl.INDEX
+	join -t '|' -v 1 ${PUBDIR}/indextimes tl.INDEX |
+	    sort - tl.INDEX > indextimes
+	mv indextimes ${PUBDIR}
+else
+	rm bl.gz el.gz tl.gz latest.ssl pub.ssl snapshot.ssl
+fi
 
 echo "`date`: Removing temporary files"
-rm bl el tl tl.INDEX
+rm bl el tl
+rm -f tl.INDEX
 rm tl.sorted metadata.latest
 rm bp.wanted bp.present
-rm f.wanted f.present
-rm s.present s.wanted
-rm t.present t.wanted
+rm bp.missing
+rm f.wanted f.present f.valid f.missing f.staged.valid f.final.valid
+rm s.present s.wanted s.missing
+rm t.present t.wanted t.valid t.missing t.staged.valid t.final.valid
 rm tp.present tp.wanted tp.needed
 
-# Remove temporary directory
-cd /tmp/
-rmdir ${WRKDIR}
+# Temporary and staging directories are removed by the exit trap.
