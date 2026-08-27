@@ -8,7 +8,8 @@ over HTTP, so `portsnap fetch` clients can be served from your own host.
 ## Requirements
 
 MidnightBSD or FreeBSD. The scripts use `/usr/libexec/phttpget`, `fetch`, `lam`,
-`sha256`, `perl`, and `lockf`, so they will not run unmodified on other systems.
+`sha256`, `bspatch`, `tar`, `perl`, and `lockf`, so they will not run unmodified on
+other systems.
 
 Budget roughly **1GB of disk** and **5GB/month of bandwidth** per mirror. Because
 portsnap's graceful-failure handling requires a mirror to carry large files it may never
@@ -30,13 +31,22 @@ crawling. Point your web server's document root at that directory.
 Runs are incremental, and every run also repairs. When the upstream `latest.ssl` is
 unchanged the script reuses the manifests it already published rather than refetching
 them, but it still confirms that every object the mirror is required to serve is present
-and that content-addressed files match their own SHA-256 name. Anything missing or
-corrupt is refetched; anything already valid is left alone.
+and valid, and prunes objects outside the signed retention set. Content-addressed files
+are checked against their SHA-256 names, binary and
+metadata patches are applied and checked against their target hashes, and snapshot
+archives are unpacked and verified against their hashed metadata. Required corrupt
+objects are replaced atomically after their repairs validate; invalid unneeded hashed
+files and tags are isolated in private staging and discarded when the run completes.
+Anything already valid is left alone. Binary-patch source objects are retained while
+their patches are retained so later scrubs remain self-contained.
 
 Downloads land in a private staging directory on the same filesystem and are only moved
 into the web root once verified, and the manifests and `.ssl` files are published last.
 A failed transfer aborts the run, so `latest.ssl` never advertises a generation the
 mirror cannot fully serve.
+Snapshot validation also rejects links, special files, duplicate members, and archives
+whose compressed, declared expanded, or per-object expanded size exceeds the safety
+limits in `pmirror.sh`.
 
 ### From cron
 
@@ -63,7 +73,8 @@ sh tests/f2-regression.sh
 The suite stubs out `phttpget` and `fetch` against a fake origin tree, so it needs no
 network and no portsnap server. It covers the failure
 modes that matter: a transfer that dies partway through, an origin that silently omits a
-requested object, and a corrupt file already sitting in the web root.
+requested object, invalid content from the origin, corrupt retained objects in every
+served object class, and symlinked publication entries.
 
 ## License
 
